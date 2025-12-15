@@ -10,7 +10,7 @@ import serial.tools.list_ports
 # NOTE: You must update this to match the serial port of your Pico W.
 # Example for macOS: '/dev/tty.usbmodem101'
 # Example for Windows: 'COM3'
-SERIAL_PORT = '/dev/tty.usbmodem101' 
+SERIAL_PORT = '/dev/tty.usbmodem1101' 
 BAUD_RATE = 115200
 
 # ====================================================================

@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 import os
 import glob
 
-def find_latest_csv(directory='../readings'):
+def find_latest_csv(directory='readings'):
     """Finds the most recently created CSV file in the specified directory."""
     try:
         # 1. Look for all CSV files in the directory

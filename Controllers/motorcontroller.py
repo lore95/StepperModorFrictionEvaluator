@@ -53,7 +53,7 @@ class MotorController:
         speed_mps = float(speed_mps)
         
         # This is the actual command that drives the motor:
-        command = f"motor.move_at_speed({distance_cm}, {speed_mps}, {direction})"
+        command = f"move_with_ramp({distance_cm}, {speed_mps}, {direction})"
         
         # We need to consider how long the motor takes to move.
         # If the command is non-blocking (Pico starts moving and immediately returns 'OK'), 
@@ -68,16 +68,8 @@ class MotorController:
             ser = serial.Serial(self.port, self.baud_rate, timeout=0.01)
             time.sleep(2) 
             self.serial = ser
-            
-            # 2. Connection handshake (Soft reboot, exit Raw REPL)
-            self.serial.write(b'\x04') # Ctrl-D
-            time.sleep(0.5)
-            self.serial.read_all() 
-            self.serial.write(b'\x02') # Ctrl-B 
-            
             # 3. Wait for standard REPL prompt
-            boot_output = self._wait_for_prompt(timeout=2.0, prompt=b'>>>')
-            
+            boot_output = self._soft_reboot()                    
             if boot_output.strip().endswith('>>>'):
                 print("[MOTOR] ✅ Connection established. Pico is ready.")
                 self.is_connected = True
@@ -92,6 +84,14 @@ class MotorController:
             print(f"[MOTOR] ❌ FATAL ERROR: Could not connect. Details: {e}")
             self.is_connected = False
             return False
+
+    def _soft_reboot(self):
+        print("[MOTOR] Performing soft reboot...")
+        self.serial.write(b'\x04') # Ctrl-D
+        time.sleep(0.5)
+        self.serial.read_all()
+        self.serial.write(b'\x02') # Ctrl-B to exit Raw REPL
+        return self._wait_for_prompt()
 
     def close(self):
         """Closes the serial connection."""

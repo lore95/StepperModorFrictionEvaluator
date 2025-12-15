@@ -51,6 +51,12 @@ class AsyncSensorReader:
         Establishes the BLE connection and enables notifications. 
         Returns immediately (True/False) without looping.
         """
+        if self.client:
+            # Should not happen if disconnect_device was called, but a safety
+            await self.client.disconnect()
+            self.client = None
+            print("emptied client")
+            
         print(f"\n[SENSOR] Attempting connection to BLE address: {self.ble_address}...")
         try:
             device = await BleakScanner.find_device_by_address(self.ble_address, timeout=10.0)
