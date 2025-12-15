@@ -140,10 +140,10 @@ class RecordingWindow(tk.Toplevel):
         )
         self.plot_btn.pack(side=tk.LEFT, padx=5)
 
-        # Cancel button to close the window without starting recording
-        self.cancel_btn = tk.Button(
+        # Close button to dismiss this window (does not quit the entire app)
+        self.close_btn = tk.Button(
             row3,
-            text="Cancel",
+            text="Close",
             command=self.close_window_or_exit,
             fg="white",
             bg="gray",
@@ -152,7 +152,21 @@ class RecordingWindow(tk.Toplevel):
             height=config.BUTTON_HEIGHT,
             font=config.FONT,
         )
-        self.cancel_btn.pack(side=tk.LEFT, padx=5)
+        self.close_btn.pack(side=tk.LEFT, padx=5)
+
+        # Quit button to exit the entire application
+        self.quit_btn = tk.Button(
+            row3,
+            text="Quit",
+            command=self._initiate_shutdown,
+            fg="white",
+            bg="darkred",
+            activebackground="red",
+            width=config.BUTTON_WIDTH,
+            height=config.BUTTON_HEIGHT,
+            font=config.FONT,
+        )
+        self.quit_btn.pack(side=tk.LEFT, padx=5)
 
         # Status label at the bottom
         self.status_label = tk.Label(
@@ -286,16 +300,18 @@ class RecordingWindow(tk.Toplevel):
 
     def _recording_finished(self, success: bool):
         """Updates the GUI after the recording is complete and initiates shutdown."""
+        # Re-enable the Start button so the user can run another recording
         self.start_btn.config(state=tk.NORMAL, bg="darkred")
         if success:
+            # When recording is finished successfully, update the status but do NOT
+            # automatically quit the application. Instead, the user can press the
+            # "Quit" button if they want to exit. Leave the window open for
+            # subsequent recordings.
             self.status_label.config(
-                text="Status: Recording Complete! Data Saved. Closing...",
-                fg="lightgreen",
+                text="Status: Recording Complete! Data Saved.", fg="lightgreen"
             )
-            # Initiate clean shutdown sequence on the Tkinter thread
-            if self.winfo_exists():
-                self.after(500, self._initiate_shutdown)
         else:
+            # In case of failure, inform the user via the label and a message box.
             self.status_label.config(
                 text="Status: Recording Failed. Check logs.", fg="red"
             )
