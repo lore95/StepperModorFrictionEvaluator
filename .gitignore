@@ -1,0 +1,10 @@
+
+readings/
+
+Controllers/__pycache__/
+
+oldreadings/
+
+Utils/__pycache__/
+
+Views/__pycache__/
