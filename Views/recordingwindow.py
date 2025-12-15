@@ -84,7 +84,7 @@ class RecordingWindow(tk.Toplevel):
         # Counter‑clockwise button (green)
         self.ccw_button = tk.Button(
             row2,
-            text="Counter‑clockwise",
+            text="Reel Out",
             width=15,
             bg="green",
             fg="white",
@@ -97,7 +97,7 @@ class RecordingWindow(tk.Toplevel):
         # Clockwise button (red)
         self.cw_button = tk.Button(
             row2,
-            text="Clockwise",
+            text="Reel In",
             width=15,
             bg="red",
             fg="white",
@@ -282,7 +282,7 @@ class RecordingWindow(tk.Toplevel):
             asyncio.run_coroutine_threadsafe(asyncio.sleep(time_to_wait), ble_loop).result()
 
             # 4. Stop sensor data acquisition and save data
-            asyncio.run_coroutine_threadsafe(self.sensor_reader.stop_reading(), ble_loop).result(timeout=5)
+            asyncio.run_coroutine_threadsafe(self.sensor_reader.stop_reading(speed_mps,distance_cm), ble_loop).result(timeout=5)
 
             print("*** RECORDING FINISHED ***")
 
@@ -292,7 +292,7 @@ class RecordingWindow(tk.Toplevel):
 
         except Exception as e:
             # Emergency stop sensor reading and save if error occurs
-            asyncio.run_coroutine_threadsafe(self.sensor_reader.stop_reading(), ble_loop)
+            asyncio.run_coroutine_threadsafe(self.sensor_reader.stop_reading(speed_mps,distance_cm), ble_loop)
             print(f"FATAL ERROR during recording task: {e}")
 
             if self.winfo_exists():

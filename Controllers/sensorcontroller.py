@@ -7,10 +7,30 @@ import csv
 from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError, BleakDBusError
 import sys 
+import numpy as np
 
 # NOTE: The UART_TX_CHAR_UUID should ideally be imported from utils/config.py
 # Assuming it's passed via the tx_uuid parameter for flexibility.
 # UART_TX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" 
+
+def hampel_filter(vals, window_size=11, n_sigmas=5.0):
+        """Simple Hampel filter to remove spikes."""
+        n = len(vals)
+        half_w = window_size // 2
+        k = 1.4826
+        filtered = vals.copy()
+        for i in range(n):
+            start = max(0, i - half_w)
+            end = min(n, i + half_w + 1)
+            window = vals[start:end]
+            med = np.median(window)
+            mad = np.median(np.abs(window - med))
+            if mad == 0:
+                continue
+            threshold = n_sigmas * k * mad
+            if abs(vals[i] - med) > threshold:
+                filtered[i] = med
+        return filtered
 
 class AsyncSensorReader:
     """
@@ -118,44 +138,57 @@ class AsyncSensorReader:
             print(f"[SENSOR] Data logging started. Timestamp: {self.start_time_host_s:.6f} s.")
             return True
         return False
-        
-    async def stop_reading(self):
+    async def stop_reading(self, distance_cm: float, speed_mps: float) -> bool:
         """Stops the data logging process and triggers the synchronous save function."""
         self.is_reading = False
         print("[SENSOR] Data logging stopped. Saving data...")
-        
-        # Run the saving function synchronously in a separate thread
-        await asyncio.to_thread(self._save_data, self.collected_data, self.start_time_host_s)
-        
-        return True
 
-    def _save_data(self, log_data, start_time):
-        """Filters data logged after the motor started and saves to a CSV file (Synchronous)."""
+        # Offload the saving work to a thread. Note: pass the function *without* calling it.
+        await asyncio.to_thread(
+            self._save_data,
+            self.collected_data,
+            self.start_time_host_s,
+            distance_cm,
+            speed_mps,
+        )
+
+        return True
+    
+    def _save_data(self, log_data, start_time, distance_cm, speed_mps):
+        """Filters data logged after the motor started and saves both raw and filtered data."""
         if not log_data:
             print("[SAVE] No data recorded to save.")
             return
 
-        # 1. Create directory and filename
+        # 1. Create directory and filename with distance and speed
         os.makedirs('readings', exist_ok=True)
         timestamp_s = int(time.time())
-        filename = os.path.join('readings', f'{timestamp_s}_grip_data.csv')
-        
-        # 2. Filter data logged after the recording started
-        filtered_data = [
-            (host_time, line) for host_time, line in log_data 
+        # sanitize speed for filename (e.g. 0.5 m/s -> 0p50)
+        speed_str = f"{speed_mps:.2f}".replace('.', 'p')
+        filename = os.path.join(
+            'readings',
+            f'{timestamp_s}_{int(distance_cm)}cm_{speed_str}mps_grip_data.csv'
+        )
+
+        # 2. Keep only data logged after the recording started
+        after_start = [
+            (host_time, line) for host_time, line in log_data
             if host_time >= start_time
         ]
-        
-        if not filtered_data:
+        if not after_start:
             print(f"[SAVE] Data log found ({len(log_data)} entries), but none were recorded after start time ({start_time:.6f} s).")
             return
 
-        # 3. Save to CSV
+        # 3. Apply filtering to the Raw_Data_Line values
+        raw_values = np.array([line for _, line in after_start], dtype=float)
+        filtered_values = hampel_filter(raw_values, window_size=11, n_sigmas=5.0)
+
+        # 4. Save to CSV with both raw and filtered columns
         with open(filename, 'w', newline='') as f:
             writer = csv.writer(f)
-            writer.writerow(['Host_Time_s', 'Raw_Data_Line']) # Header
-            
-            for host_time, line in filtered_data:
-                writer.writerow([f"{host_time:.6f}", line])
-                
-        print(f"\n[SAVE] Successfully saved {len(filtered_data)} data points to {filename}")
+            writer.writerow(['Host_Time_s', 'Raw_Data_Line', 'Filtered_Line'])  # Header
+            for (host_time, raw_line), filt_line in zip(after_start, filtered_values):
+                writer.writerow([f"{host_time:.6f}", raw_line, int(filt_line)])
+
+        print(f"\n[SAVE] Saved {len(after_start)} data points to {filename}")
+        
