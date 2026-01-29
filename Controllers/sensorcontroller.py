@@ -8,6 +8,7 @@ from bleak import BleakClient, BleakScanner
 from bleak.exc import BleakError, BleakDBusError
 import sys 
 import numpy as np
+from datetime import date
 
 # NOTE: The UART_TX_CHAR_UUID should ideally be imported from utils/config.py
 # Assuming it's passed via the tx_uuid parameter for flexibility.
@@ -138,7 +139,8 @@ class AsyncSensorReader:
             print(f"[SENSOR] Data logging started. Timestamp: {self.start_time_host_s:.6f} s.")
             return True
         return False
-    async def stop_reading(self, distance_cm: float, speed_mps: float) -> bool:
+    
+    async def stop_reading(self, distance_cm: float, speed_mps: float, weight_kg: int, turf_id: str) -> bool:
         """Stops the data logging process and triggers the synchronous save function."""
         self.is_reading = False
         print("[SENSOR] Data logging stopped. Saving data...")
@@ -150,43 +152,52 @@ class AsyncSensorReader:
             self.start_time_host_s,
             distance_cm,
             speed_mps,
+            weight_kg,
+            turf_id
         )
 
         return True
     
-    def _save_data(self, log_data, start_time, distance_cm, speed_mps):
-        """Filters data logged after the motor started and saves both raw and filtered data."""
-        if not log_data:
-            print("[SAVE] No data recorded to save.")
-            return
+    
+    def _save_data(self, log_data, start_time, speed_mps, distance_cm, weight_kg, turf_id):
+        os.makedirs("readings", exist_ok=True)
 
-        # 1. Create directory and filename with distance and speed
-        os.makedirs('readings', exist_ok=True)
+        today_str = date.today().isoformat()  # "YYYY-MM-DD"
+        turf_id = (turf_id or "").strip()
+
+        # Find an existing folder in readings that contains both today and turf_id
+        save_dir = None
+        for name in os.listdir("readings"):
+            path = os.path.join("readings", name)
+            if os.path.isdir(path) and (today_str in name) and (turf_id in name):
+                save_dir = path
+                break
+
+        # If none found, create a new one named "<today>_<turf_id>"
+        if save_dir is None:
+            folder_name = f"{today_str}_{turf_id}" if turf_id else today_str
+            save_dir = os.path.join("readings", folder_name)
+            os.makedirs(save_dir, exist_ok=True)
+
         timestamp_s = int(time.time())
-        # sanitize speed for filename (e.g. 0.5 m/s -> 0p50)
-        speed_str = f"{speed_mps:.2f}".replace('.', 'p')
+        speed_str = f"{speed_mps:.4f}".replace(".", "p")
+
         filename = os.path.join(
-            'readings',
-            f'{timestamp_s}_{int(distance_cm)}cm_{speed_str}mps_grip_data.csv'
+            save_dir,
+            f"{timestamp_s}_{int(distance_cm)}cm_{speed_str}mps_{weight_kg}kg_grip_data.csv"
         )
 
-        # 2. Keep only data logged after the recording started
-        after_start = [
-            (host_time, line) for host_time, line in log_data
-            if host_time >= start_time
-        ]
+        after_start = [(host_time, line) for host_time, line in log_data if host_time >= start_time]
         if not after_start:
             print(f"[SAVE] Data log found ({len(log_data)} entries), but none were recorded after start time ({start_time:.6f} s).")
             return
 
-        # 3. Apply filtering to the Raw_Data_Line values
         raw_values = np.array([line for _, line in after_start], dtype=float)
         filtered_values = hampel_filter(raw_values, window_size=11, n_sigmas=5.0)
 
-        # 4. Save to CSV with both raw and filtered columns
-        with open(filename, 'w', newline='') as f:
+        with open(filename, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(['Host_Time_s', 'Raw_Data_Line', 'Filtered_Line'])  # Header
+            writer.writerow(["Host_Time_s", "Raw_Data_Line", "Filtered_Line"])
             for (host_time, raw_line), filt_line in zip(after_start, filtered_values):
                 writer.writerow([f"{host_time:.6f}", raw_line, int(filt_line)])
 

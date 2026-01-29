@@ -50,7 +50,7 @@ class MainWindow(tk.Tk):
 
         # 3. StartApp Button
         self.start_app_btn = self._create_button(
-            frame, text="StartApp", command=self._start_application, state=tk.DISABLED 
+            frame, text="StartApp", command=self._start_application, #TODO testing #state=tk.DISABLED 
         )
         self.start_app_btn.grid(row=0, column=2, padx=10, pady=10)
         
@@ -205,9 +205,10 @@ class MainWindow(tk.Tk):
         """Action for the StartApp button: Hides this window and opens the RecordingWindow."""
         print("\n*** APPLICATION STARTED ***")
         
-        if not (self.motor_connected and self.sensor_connected):
-            messagebox.showwarning("Connection Required", "Both Motor and Force Sensor must be connected to proceed.")
-            return
+        #TODO Enable after testing
+        # if not (self.motor_connected and self.sensor_connected):
+        #     messagebox.showwarning("Connection Required", "Both Motor and Force Sensor must be connected to proceed.")
+        #     return
 
         # 1. Hide the current window
         self.withdraw()
