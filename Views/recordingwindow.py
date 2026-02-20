@@ -9,12 +9,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import csv
 from typing import Optional
+from typing import Tuple
 
 from Utils import config
 from Utils.calculateDynamicAndStaticFriciton import (
     estimate_static_dynamic_forces,
     load_time_force,
-    clean_time_force_for_friction
+    clean_time_force_for_friction,
+    dynamic_window_from_result,
+    parse_meta,
 )
 
 class RecordingWindow(tk.Toplevel):
@@ -260,8 +263,10 @@ class RecordingWindow(tk.Toplevel):
 
         # All conditions must be met: motor and sensor connected, valid cm, valid speed,weight insterted, and direction selected
         if (
-            #TODO reanable after testing # self.motor_controller.is_connected
+            #TODO reanable after testing 
+            # self.motor_controller.is_connected
             # and self.sensor_reader.is_connected
+            # and 
             cm_valid
             and speed_valid
             and direction_valid
@@ -312,7 +317,7 @@ class RecordingWindow(tk.Toplevel):
             print("\n*** RECORDING STARTED ***")
 
             # 1. Start continuous sensor data logging
-            asyncio.run_coroutine_threadsafe(self.sensor_reader.start_reading(), ble_loop).result(timeout=5)
+            asyncio.run_coroutine_threadsafe(self.sensor_reader.start_reading(direction=direction), ble_loop).result(timeout=5)
 
             # 2. Send the motor move command (Synchronous/Blocking operation)
             motor_output_future = asyncio.run_coroutine_threadsafe(
@@ -325,7 +330,7 @@ class RecordingWindow(tk.Toplevel):
             print(f"[MOTOR] Command Response: {motor_output.strip()}")
 
             # 3. Wait for Motor Movement to Complete (rough estimation)
-            time_to_wait = max(10, distance_cm / (speed_mps * 100)) + 1
+            time_to_wait = max(3, distance_cm / (speed_mps * 100)) + 1
             print(f"[WAIT] Waiting for movement completion ({time_to_wait:.1f} s)...")
             asyncio.run_coroutine_threadsafe(asyncio.sleep(time_to_wait), ble_loop).result()
 
@@ -395,7 +400,7 @@ class RecordingWindow(tk.Toplevel):
             # If user chooses not to exit, just destroy this window and show the main one
             self.destroy()
             self.master.deiconify()
-
+    
     def compare_friction(self):
         readings_dir = "readings"
         if not os.path.isdir(readings_dir):
@@ -406,7 +411,6 @@ class RecordingWindow(tk.Toplevel):
             d for d in os.listdir(readings_dir)
             if os.path.isdir(os.path.join(readings_dir, d))
         )
-
         if not folders:
             messagebox.showinfo("Compare friction", "No folders found.")
             return
@@ -433,31 +437,36 @@ class RecordingWindow(tk.Toplevel):
 
         lb.bind("<ButtonRelease-1>", _toggle)
 
-        def _parse_weight(fname: str) -> Optional[float]:
-            m = re.search(r"_(\d+(?:\.\d+)?)kg_grip_data\.csv$", fname)
-            return float(m.group(1)) if m else None
-
         def _on_select():
             selected = [lb.get(i) for i in lb.curselection()]
             if len(selected) < 2:
                 messagebox.showwarning("Compare friction", "Select at least 2 folders.")
                 return
 
-            static_by_folder = {}
-            dynamic_by_folder = {}
+            # measured force (stored in cN)
+            static_force_by_folder = {}
+            dynamic_force_by_folder = {}
+
+            # "friction" outputs (static == measured static; dynamic == measured dynamic)
+            static_fric_by_folder = {}
+            dynamic_fric_by_folder = {}
+
             all_weights = set()
 
             for folder in selected:
                 fpath = os.path.join(readings_dir, folder)
-                s_map, d_map = {}, {}
+
+                sF_map, dF_map = {}, {}
+                sMu_map, dMu_map = {}, {}
 
                 for fname in os.listdir(fpath):
-                    if not fname.endswith("kg_grip_data.csv"):
+                    if not fname.endswith("grip_data.csv"):
                         continue
 
-                    w = _parse_weight(fname)
-                    if w is None:
+                    meta = parse_meta(fname)
+                    if meta is None:
                         continue
+                    v_mps, w = meta
 
                     csv_path = os.path.join(fpath, fname)
 
@@ -474,44 +483,90 @@ class RecordingWindow(tk.Toplevel):
                         )
 
                         res = estimate_static_dynamic_forces(df_clean, include_peak_in_dynamic=False)
-                        Fs = res["Fs_max"]
-                        Fk = res["Fk_mean"]
 
-                        s_map.setdefault(w, []).append(Fs)
-                        d_map.setdefault(w, []).append(Fk)
+                        t = df_clean["time"].to_numpy(dtype=float)
+                        F_cN = df_clean["force"].to_numpy(dtype=float)  # <-- cN
+                        n = len(F_cN)
+
+                        peak_idx = int(res["peak_idx"])
+                        trough_idx = int(res["trough_idx"])
+                        a_idx, b_idx = dynamic_window_from_result(res, n, include_peak_in_dynamic=False)
+
+                        peak_t = float(t[peak_idx])
+                        dyn_t0 = float(t[a_idx])
+                        dyn_t1 = float(t[b_idx])
+
+                        Fs_meas_cN = float(res["Fs_max"])   # cN
+                        Fk_meas_cN = float(res["Fk_mean"])  # cN
+
+                        # No inertia correction (static ~ v=0; dynamic window assumed constant speed)
+                        Fs_fric_cN = Fs_meas_cN
+                        Fk_fric_cN = Fk_meas_cN
+
+                        print(
+                            "file:", fname,
+                            "m_kg:", w,
+                            "v_mps:", v_mps,
+                            "peak_t:", peak_t,
+                            "dyn_t:", (dyn_t0, dyn_t1),
+                            "Fs_cN:", Fs_meas_cN,
+                            "Fk_cN:", Fk_meas_cN
+                        )
+
+                        sF_map.setdefault(w, []).append(Fs_meas_cN)
+                        dF_map.setdefault(w, []).append(Fk_meas_cN)
+
+                        sMu_map.setdefault(w, []).append(Fs_fric_cN)
+                        dMu_map.setdefault(w, []).append(Fk_fric_cN)
+
                         all_weights.add(w)
-
-                        # Optional: if you want to see what window it used
-                        # print(f"[{folder}] {fname} w={w}kg Fs={Fs:.2f}N (peak@{res['peak_idx']}) "
-                        #       f"Fk={Fk:.2f}N (dyn_n={res['dynamic_n']} trough@{res['trough_idx']})")
 
                     except Exception as e:
                         print(f"[COMPARE] Skipping {csv_path}: {e}")
 
-                if s_map:
-                    static_by_folder[folder] = s_map
-                    dynamic_by_folder[folder] = d_map
+                if sF_map:
+                    static_force_by_folder[folder] = sF_map
+                    dynamic_force_by_folder[folder] = dF_map
+                    static_fric_by_folder[folder] = sMu_map
+                    dynamic_fric_by_folder[folder] = dMu_map
 
-            if len(static_by_folder) < 2:
+            if len(static_force_by_folder) < 2:
                 messagebox.showerror("Compare friction", "Not enough usable data.")
                 return
 
             weights = sorted(all_weights)
 
-            # ---- Static plot ----
-            plt.figure()
-            for folder, wmap in static_by_folder.items():
+            G = 9.80665
+            CN_TO_N = 1.0 / 100.0   # 1 cN = 0.01 N
+            N_TO_CN = 100.0
+
+            def _mean_points_from_map(wmap: dict) -> Tuple[np.ndarray, np.ndarray]:
                 xs, ys = [], []
                 for w in weights:
-                    if w in wmap:
-                        xs.append(w)
-                        ys.append(np.mean(wmap[w]))
-                if xs:
-                    plt.plot(xs, ys, marker="o", label=folder)
-                    # Label each point with its force value
-                    for x, y in zip(xs, ys):
+                    if w in wmap and len(wmap[w]) > 0:
+                        val = float(np.mean(wmap[w]))
+                        if np.isfinite(val):
+                            xs.append(float(w))
+                            ys.append(val)
+                return np.array(xs, dtype=float), np.array(ys, dtype=float)
+
+            def _plot_force_map_with_fit_N(title: str, ylabel: str, data_by_folder: dict):
+                """
+                Plot mean force (N) vs mass and overlay a linear fit:
+
+                    F_N = (mu*g)*m + F0_N
+                """
+                plt.figure()
+                for folder, wmap in data_by_folder.items():
+                    xs, F_N = _mean_points_from_map(wmap)
+                    if len(xs) == 0:
+                        continue
+
+                    # plot data in N
+                    plt.plot(xs, F_N, marker="o", label=folder)
+                    for x, y in zip(xs, F_N):
                         plt.annotate(
-                            f"{y:.1f}",
+                            f"{y:.3f}",  # more sensible for N
                             (x, y),
                             textcoords="offset points",
                             xytext=(0, 6),
@@ -519,42 +574,90 @@ class RecordingWindow(tk.Toplevel):
                             fontsize=8,
                         )
 
-            plt.xlabel("Weight (kg)")
-            plt.ylabel("Static friction force Fs,max (cN)")
-            plt.title("Static friction comparison")
-            plt.grid(True)
-            plt.legend()
-            plt.tight_layout()
-            plt.show()
+                    if len(xs) >= 2:
+                        a_N_per_kg, b_N = np.polyfit(xs, F_N, 1)
+                        mu_est = a_N_per_kg / G
 
-            # ---- Dynamic plot ----
-            plt.figure()
-            for folder, wmap in dynamic_by_folder.items():
-                xs, ys = [], []
-                for w in weights:
-                    if w in wmap:
-                        xs.append(w)
-                        ys.append(np.mean(wmap[w]))
-                if xs:
-                    plt.plot(xs, ys, marker="o", label=folder)
-                    # Label each point with its force value
-                    for x, y in zip(xs, ys):
+                        xfit = np.linspace(xs.min(), xs.max(), 50)
+                        yfit_N = a_N_per_kg * xfit + b_N
+
+                        plt.plot(
+                            xfit,
+                            yfit_N,
+                            linestyle="--",
+                            label=f"{folder} fit: μ≈{mu_est:.3f}, F0≈{b_N:.3f} N"
+                        )
+
+                plt.xlabel("Weight (kg)")
+                plt.ylabel(ylabel)  # make sure ylabel reflects N, e.g. "Force (N)"
+                plt.title(title)
+                plt.grid(True)
+                plt.legend()
+                plt.tight_layout()
+                plt.show()
+
+            def _plot_mu_map_from_N(title: str, ylabel: str, data_by_folder: dict):
+                plt.figure()
+                for folder, wmap in data_by_folder.items():
+                    xs, F_Newtons = _mean_points_from_map(wmap)
+                    if len(xs) == 0:
+                        continue
+                    mus = F_Newtons / (xs * G)
+
+                    plt.plot(xs, mus, marker="o", label=folder)
+                    for x, mu in zip(xs, mus):
                         plt.annotate(
-                            f"{y:.1f}",
-                            (x, y),
+                            f"{mu:.3f}",
+                            (x, mu),
                             textcoords="offset points",
                             xytext=(0, 6),
                             ha="center",
                             fontsize=8,
                         )
 
-            plt.xlabel("Weight (kg)")
-            plt.ylabel("Dynamic friction force Fk (cN)")
-            plt.title("Dynamic friction comparison")
-            plt.grid(True)
-            plt.legend()
-            plt.tight_layout()
-            plt.show()
+                plt.xlabel("Weight (kg)")
+                plt.ylabel(ylabel)
+                plt.title(title)
+                plt.grid(True)
+                plt.legend()
+                plt.tight_layout()
+                plt.show()
+
+            UNIT_FORCE = "N"
+
+            # Force plots (cN) + fit (μ and F0 computed correctly)
+            _plot_force_map_with_fit_N(
+                "Static force comparison (measured) + fit",
+                f"Static peak force Fs,max ({UNIT_FORCE})",
+                static_force_by_folder,
+            )
+            _plot_force_map_with_fit_N(
+                "Dynamic force comparison (measured) + fit",
+                f"Dynamic mean force Fk ({UNIT_FORCE})",
+                dynamic_force_by_folder,
+            )
+            _plot_force_map_with_fit_N(
+                "Static friction comparison + fit",
+                f"Static friction force ({UNIT_FORCE})",
+                static_fric_by_folder,
+            )
+            _plot_force_map_with_fit_N(
+                "Dynamic friction comparison + fit",
+                f"Dynamic friction force ({UNIT_FORCE})",
+                dynamic_fric_by_folder,
+            )
+
+            # μ plots (dimensionless, using cN->N conversion)
+            _plot_mu_map_from_N(
+                "Static coefficient of friction μs vs weight",
+                "μs (dimensionless)",
+                static_fric_by_folder,
+            )
+            _plot_mu_map_from_N(
+                "Dynamic coefficient of friction μk vs weight",
+                "μk (dimensionless)",
+                dynamic_fric_by_folder,
+            )
 
             top.destroy()
 

@@ -31,34 +31,39 @@ class MainWindow(tk.Tk):
         self.motor_connected = False
         self.sensor_connected = False
         self.recording_window = None # Initialize as None
-        
         # --- GUI Setup ---
         self._create_widgets()
         
     def _create_widgets(self):
-        """Creates and places the buttons in the main window."""
         frame = tk.Frame(self, bg="black")
         frame.pack(expand=True, padx=20, pady=20)
 
-        # 1. Motor Button
+        # --- Row 0: Motor ---
         self.motor_btn = self._create_button(frame, text="Motor", command=self._start_motor_connection_thread)
-        self.motor_btn.grid(row=0, column=0, padx=10, pady=10)
+        self.motor_btn.grid(row=0, column=0, padx=(10, 4), pady=10, sticky="ew")
 
-        # 2. ForceSensor Button
+        self.motor_status = tk.Label(frame, width=2, bg="red")  # status dot
+        self.motor_status.grid(row=0, column=1, padx=(0, 10), pady=10)
+
+        # --- Row 1: Sensor ---
         self.sensor_btn = self._create_button(frame, text="ForceSensor", command=self._start_sensor_connection_async)
-        self.sensor_btn.grid(row=0, column=1, padx=10, pady=10)
+        self.sensor_btn.grid(row=1, column=0, padx=(10, 4), pady=10, sticky="ew")
 
-        # 3. StartApp Button
-        self.start_app_btn = self._create_button(
-            frame, text="StartApp", command=self._start_application, #TODO testing #state=tk.DISABLED 
-        )
-        self.start_app_btn.grid(row=0, column=2, padx=10, pady=10)
+        self.sensor_status = tk.Label(frame, width=2, bg="red")
+        self.sensor_status.grid(row=1, column=1, padx=(0, 10), pady=10)
+
+        # --- Row 2: Start ---
+        self.start_app_btn = self._create_button(frame, text="StartApp", command=self._start_application)
+        self.start_app_btn.grid(row=2, column=0, padx=10, pady=10, sticky="ew")
+
+        self.start_status = tk.Label(frame, width=2, bg="red")
+        self.start_status.grid(row=2, column=1, padx=(0, 10), pady=10)
+
+        # initial colors
+        self._set_button_color(self.motor_btn, "red")
+        self._set_button_color(self.sensor_btn, "red")
+        self._set_button_color(self.start_app_btn, "red")
         
-        # Initial color setup (Red)
-        self._update_button_color(self.motor_btn, "red")
-        self._update_button_color(self.sensor_btn, "red")
-        self._update_button_color(self.start_app_btn, "red")
-
     def _create_button(self, parent, text, command, state=tk.NORMAL):
         """Helper function to create a standardized button."""
         # Using placeholder values for config if it's not defined
@@ -70,7 +75,7 @@ class MainWindow(tk.Tk):
             parent,
             text=text,
             command=command,
-            fg="white", 
+            fg="black", 
             activeforeground="white",
             relief=tk.RAISED,
             width=width_config,
@@ -80,20 +85,26 @@ class MainWindow(tk.Tk):
         )
 
     # --- UI Update Methods ---
-    
-    def _update_button_color(self, button: tk.Button, color: str):
-        """Safely updates a button's background color."""
+    def _set_button_color(self, button: tk.Button, color: str):
         button.config(bg=color, activebackground=color)
-        
+
+    def _set_status_color(self, which: str, color: str):
+        if which == "motor":
+            self.motor_status.config(bg=color)
+        elif which == "sensor":
+            self.sensor_status.config(bg=color)
+        elif which == "start":
+            self.start_status.config(bg=color)
+
     def _check_start_condition(self):
-        """Checks if both connections are active to enable the StartApp button."""
         if self.motor_connected and self.sensor_connected:
-            self._update_button_color(self.start_app_btn, "green")
+            self._set_button_color(self.start_app_btn, "green")
+            self._set_status_color("start", "green")
             self.start_app_btn.config(state=tk.NORMAL)
         else:
-            self._update_button_color(self.start_app_btn, "red")
-            self.start_app_btn.config(state=tk.DISABLED)
-
+            self._set_button_color(self.start_app_btn, "red")
+            self._set_status_color("start", "red")
+            #TODO self.start_app_btn.config(state=tk.DISABLED)
     # --- MOTOR CONNECTION LOGIC (Synchronous Thread) ---
 
     def _start_motor_connection_thread(self):
@@ -122,13 +133,14 @@ class MainWindow(tk.Tk):
             self.after(0, lambda: self._handle_motor_connection_result(success))
 
     def _handle_motor_connection_result(self, success):
-        """Receives result and updates the UI."""
         self.motor_connected = success
-        new_color = "green" if success else "red"
-        new_text = "Motor (OK)" if success else "Motor (FAIL)"
-        
-        self._update_button_color(self.motor_btn, new_color)
-        self.motor_btn.config(text=new_text, state=tk.NORMAL)
+        color = "green" if success else "red"
+        text = "Motor (OK)" if success else "Motor (FAIL)"
+
+        self._set_button_color(self.motor_btn, color)
+        self._set_status_color("motor", color)
+        self.motor_btn.config(text=text, state=tk.NORMAL)
+
         self._check_start_condition()
 
     # --- SENSOR CONNECTION LOGIC (Asyncio Threadsafe) ---
@@ -191,13 +203,14 @@ class MainWindow(tk.Tk):
         self.after(0, lambda: self._handle_sensor_result(False))
 
     def _handle_sensor_result(self, success):
-        """Updates the GUI based on the connection status."""
         self.sensor_connected = success
-        new_color = "green" if success else "red"
-        new_text = "Sensor (OK)" if success else "ForceSensor (FAIL)"
-        
-        self._update_button_color(self.sensor_btn, new_color)
-        self.sensor_btn.config(text=new_text, state=tk.NORMAL)
+        color = "green" if success else "red"
+        text = "Sensor (OK)" if success else "ForceSensor (FAIL)"
+
+        self._set_button_color(self.sensor_btn, color)
+        self._set_status_color("sensor", color)
+        self.sensor_btn.config(text=text, state=tk.NORMAL)
+
         self._check_start_condition()
 
     # --- APPLICATION START ---

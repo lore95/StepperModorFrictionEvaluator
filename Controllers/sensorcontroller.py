@@ -1,171 +1,345 @@
-# controllers/sensor_controller.py
+# Controllers/sensorcontroller.py
 
 import asyncio
 import time
 import os
 import csv
-from bleak import BleakClient, BleakScanner
-from bleak.exc import BleakError, BleakDBusError
-import sys 
 import numpy as np
 from datetime import date
+import re
+from typing import Callable, Optional, Awaitable, Any, Dict
 
-# NOTE: The UART_TX_CHAR_UUID should ideally be imported from utils/config.py
-# Assuming it's passed via the tx_uuid parameter for flexibility.
-# UART_TX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" 
+from bleak import BleakClient
+from bleak.exc import BleakError, BleakDBusError
+
+from Utils.sensorForceConverter import V3ForceCalibrator
+
+
+LINE_RE = re.compile(
+    r"Time:(-?\d+),V1:(-?\d+(?:\.\d+)?),V2:(-?\d+(?:\.\d+)?),V3:(-?\d+(?:\.\d+)?),V4:(-?\d+(?:\.\d+)?)"
+)
+
 
 def hampel_filter(vals, window_size=11, n_sigmas=5.0):
-        """Simple Hampel filter to remove spikes."""
-        n = len(vals)
-        half_w = window_size // 2
-        k = 1.4826
-        filtered = vals.copy()
-        for i in range(n):
-            start = max(0, i - half_w)
-            end = min(n, i + half_w + 1)
-            window = vals[start:end]
-            med = np.median(window)
-            mad = np.median(np.abs(window - med))
-            if mad == 0:
-                continue
-            threshold = n_sigmas * k * mad
-            if abs(vals[i] - med) > threshold:
-                filtered[i] = med
-        return filtered
+    """Simple Hampel filter to remove spikes."""
+    n = len(vals)
+    half_w = window_size // 2
+    k = 1.4826
+    filtered = vals.copy()
+    for i in range(n):
+        start = max(0, i - half_w)
+        end = min(n, i + half_w + 1)
+        window = vals[start:end]
+        med = np.median(window)
+        mad = np.median(np.abs(window - med))
+        if mad == 0:
+            continue
+        threshold = n_sigmas * k * mad
+        if abs(vals[i] - med) > threshold:
+            filtered[i] = med
+    return filtered
+
 
 class AsyncSensorReader:
     """
-    Manages the asynchronous BLE connection (View/Connect) and concurrent 
-    data acquisition (Model/Read) for the Force Sensor.
+    BLE sensor reader with:
+      - start_notify handler to collect raw + force
+      - unexpected disconnect handling via Bleak disconnected_callback
+      - optional async prompt_save_cb (must be thread-safe)
     """
-    
-    def __init__(self, ble_address, tx_uuid):
+
+    def __init__(
+        self,
+        ble_address: str,
+        tx_uuid: str,
+        ble_loop: asyncio.AbstractEventLoop,
+        *,
+        prompt_save_cb: Optional[Callable[[], Awaitable[bool]]] = None,
+        calibration_csv: str = "Utils/calibrationWeight/V3_calibration.csv",
+    ):
         self.ble_address = ble_address
         self.tx_uuid = tx_uuid
-        self.client = None
-        self.is_connected = False 
-        self.is_reading = False       # Flag to control data logging
-        self.collected_data = []      # Container for data
-        self.start_time_host_s = 0.0  # Host time when recording officially starts
+        self.ble_loop = ble_loop
 
-    # --- Data Acquisition Handler ---
+        self.client: Optional[BleakClient] = None
+        self.is_connected = False
+        self.is_reading = False
+        self.offSetValue = 0.0
+
+        self.collected_raw_data = []    # list[(host_time_s, raw_v3)]
+        self.collected_force_data = []  # list[(host_time_s, force_n)]
+        self.start_time_host_s = 0.0
+
+        self.calibrator = V3ForceCalibrator(
+            calibration_csv,
+            method="piecewise",
+            allow_extrapolation=True,
+        )
+
+        self.prompt_save_cb = prompt_save_cb
+        self._disconnect_lock = asyncio.Lock()
+        # Used when disconnect happens mid-run and you want to save partial
+        self._pending_meta: Dict[str, Any] = {
+            "distance_cm": 0.0,
+            "speed_mps": 0.0,
+            "weight_kg": 0,
+            "turf_id": "ERROR",
+        }
+
+    # -------------------- Notifications --------------------
     def notification_handler(self, sender: int, data: bytearray):
-        """
-        Called every time the BLE device sends data.
-        Logs data only if the self.is_reading flag is True.
-        """
         host_time = time.time()
-        
-        if self.is_reading:
-            try:
-                decoded_data = data.decode('utf-8', errors='ignore').strip()
-                # Log Host Timestamp and Raw Data Line
-                self.collected_data.append((host_time, decoded_data))
-            except Exception:
-                # Log raw bytes if decoding fails
-                self.collected_data.append((host_time, str(data)))
+        if not self.is_reading:
+            return
 
-    # --- 1. Connection/Disconnection Methods ---
-    
-    async def connect_device(self):
-        """
-        Establishes the BLE connection and enables notifications. 
-        Returns immediately (True/False) without looping.
-        """
+        try:
+            line = data.decode("utf-8", errors="ignore").strip()
+            m = LINE_RE.match(line)
+            if not m:
+                return
+
+            t_ms = int(m.group(1))
+            v3_raw = float(m.group(4))
+
+            self.collected_raw_data.append((host_time, v3_raw))
+
+            v3_force = self.calibrator.raw_to_force(v3_raw,self.offSetValue)
+
+            self.collected_force_data.append((host_time, v3_force))
+
+        except Exception as e:
+            print(f"[SENSOR] notification_handler error: {e}")
+
+    # -------------------- Disconnect handling --------------------
+    def _on_disconnect(self, _client: BleakClient):
+        print("[SENSOR] ⚠️ Device disconnected unexpectedly.")
+
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._handle_disconnect(),
+                self.ble_loop,   # ✅ USE THE STORED LOOP
+            )
+        except Exception as e:
+            print(f"[SENSOR] Failed to schedule disconnect handler: {e}")
+            self.is_connected = False
+            self.is_reading = False
+
+    async def _handle_disconnect(self):
+        try:
+            async with self._disconnect_lock:
+                was_reading = self.is_reading
+
+                self.is_connected = False
+                self.is_reading = False
+                print("[SENSOR] Handling disconnect...")
+                
+                # Ask UI whether to save (defaults to True if no callback)
+                save = True
+                if self.prompt_save_cb is not None:
+                    try:
+                        save = await self.prompt_save_cb()
+                    except Exception as e:
+                        print(f"[SENSOR] prompt_save_cb failed: {e}")
+                        save = True
+
+                # Clear client reference (it may already be dead)
+                if self.client:
+                    try:
+                        await self.client.disconnect()
+                    except Exception:
+                        pass
+                    self.client = None
+
+                if not was_reading:
+                    self._clear_buffers()
+                    print("[SENSOR] buffers cleared")
+                    return
+
+                if save:
+                    print("[SENSOR] User chose to save partial data.")
+                    meta = dict(self._pending_meta)
+                    await asyncio.to_thread(
+                        self._save_data,
+                        self.collected_raw_data,
+                        self.collected_force_data,
+                        self.start_time_host_s,
+                        self.
+                        meta.get("speed_mps", 0.0),
+                        meta.get("distance_cm", 0.0),
+                        meta.get("weight_kg", 0),
+                        meta.get("turf_id", "DISCONNECT"),
+                    )
+                    self._clear_buffers()
+                else:
+                    print("[SENSOR] User chose NOT to save. Clearing buffers.")
+                    self._clear_buffers()
+
+        except Exception as e:
+            print(f"[SENSOR] _handle_disconnect crashed: {e}")
+
+    def _clear_buffers(self):
+        self.collected_raw_data.clear()
+        self.collected_force_data.clear()
+        self._pending_meta = {
+            "distance_cm": 0.0,
+            "speed_mps": 0.0,
+            "weight_kg": 0,
+            "turf_id": "UNKNOWN",
+        }
+
+    # -------------------- Connect / Disconnect --------------------
+    async def connect_device(self) -> bool:
         if self.client:
-            # Should not happen if disconnect_device was called, but a safety
-            await self.client.disconnect()
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
             self.client = None
-            print("emptied client")
-            
+
         print(f"\n[SENSOR] Attempting connection to BLE address: {self.ble_address}...")
         try:
-            device = await BleakScanner.find_device_by_address(self.ble_address, timeout=10.0)
-            if not device:
-                raise BleakError(f"A device with address {self.ble_address} could not be found.")
-            
-            # Use force_disconnect=True for robustness
-            self.client = BleakClient(device, timeout=22.0, force_disconnect=True)
+            self.client = BleakClient(
+                self.ble_address,
+                timeout=20.0,
+                disconnected_callback=self._on_disconnect,  # ✅ critical
+            )
             await self.client.connect()
 
             if not self.client.is_connected:
-                 print("[SENSOR] ❌ Failed to connect.")
-                 self.is_connected = False
-                 return False
+                print("[SENSOR] Failed to connect.")
+                self.is_connected = False
+                return False
+            baseline_samples = []
+            print("[SENSOR] Calibrating base line for force convertion ")
+
+            def _baseline_handler(sender: int, data: bytearray):
+                try:
+                    line = data.decode("utf-8", errors="ignore").strip()
+                    m = LINE_RE.match(line)
+                    if not m:
+                        return
+                    v3_raw = float(m.group(4))
+                    baseline_samples.append(v3_raw)
+                except Exception:
+                    return
+            await self.client.start_notify(self.tx_uuid, _baseline_handler)
+            print("[SENSOR] Collecting baseline for 5 seconds...")
+            await asyncio.sleep(5.0)
+
+            # Stop temporary notify
+            try:
+                await self.client.stop_notify(self.tx_uuid)
+            except Exception:
+                pass
+
+            if baseline_samples:
+                self.offSetValue = float(np.median(np.array(baseline_samples, dtype=float)))
+                print(f"[SENSOR] Baseline median set: offSetValue={self.offSetValue:.3f} (n={len(baseline_samples)})")
+            else:
+                self.offSetValue = 0.0
+                print("[SENSOR] No baseline samples received. offSetValue set to 0.0")
+
             
-            # CRITICAL: Start notify immediately upon successful connection.
-            # This enables the flow to the notification_handler.
             await self.client.start_notify(self.tx_uuid, self.notification_handler)
-            print("[SENSOR] ✅ Connection established. Notifications activated.")
+            print("[SENSOR] ✅ Connected. Notifications activated.")
             self.is_connected = True
-            
+
             return True
 
         except (BleakError, BleakDBusError) as e:
             print(f"[SENSOR] ❌ Connection/Discovery Error: {e}")
             self.is_connected = False
+            self.client = None
             return False
         except Exception as e:
-            print(f"[SENSOR] ❌ An unexpected error occurred: {e}")
+            print(f"[SENSOR] ❌ Unexpected error: {e}")
             self.is_connected = False
+            self.client = None
             return False
 
-    async def disconnect_device(self):
-        """Stops notifications and physically disconnects the client."""
-        if self.is_connected:
-            if self.client and self.client.is_connected:
-                try:
-                    await self.client.stop_notify(self.tx_uuid)
-                except Exception:
-                    pass
+    async def disconnect_device(self) -> bool:
+        # Intentional disconnect: no popup
+        self.is_reading = False
+
+        if self.client:
+            try:
+                await self.client.stop_notify(self.tx_uuid)
+            except Exception:
+                pass
+            try:
                 await self.client.disconnect()
-            
-            self.is_connected = False
-            print("[SENSOR] Explicitly disconnected.")
-            return True
-        return False
-    
-    # Alias 'close' to 'disconnect_device' for compatibility with the orchestrator
+            except Exception:
+                pass
+            self.client = None
+
+        self.is_connected = False
+        print("[SENSOR] Explicitly disconnected.")
+        return True
+
     close = disconnect_device
 
-    # --- 2. Data Acquisition Methods (Reading/Logging) ---
-    
-    async def start_reading(self):
-        """Starts the process of logging sensor data by flipping the internal flag."""
+    # -------------------- Reading control --------------------
+    async def start_reading(
+        self,
+        *,
+        distance_cm: float = 0.0,
+        speed_mps: float = 0.0,
+        weight_kg: int = 0,
+        turf_id: str = "UNKNOWN",
+        direction: int = 0
+    ) -> bool:
         if self.client and self.client.is_connected:
-            self.collected_data.clear()
-            self.start_time_host_s = time.time() # Record the precise host time of start
-            self.is_reading = True
-            print(f"[SENSOR] Data logging started. Timestamp: {self.start_time_host_s:.6f} s.")
+            self.collected_raw_data.clear()
+            self.collected_force_data.clear()
+            self.start_time_host_s = time.time()
+            if(direction == 0):
+                self.is_reading = True
+            self._pending_meta = {
+                "distance_cm": float(distance_cm),
+                "speed_mps": float(speed_mps),
+                "weight_kg": int(weight_kg),
+                "turf_id": str(turf_id or "UNKNOWN"),
+            }
+            if(direction == 0):
+                print(f"[SENSOR] Data logging started. Timestamp: {self.start_time_host_s:.6f} s.")
             return True
         return False
-    
+
     async def stop_reading(self, distance_cm: float, speed_mps: float, weight_kg: int, turf_id: str) -> bool:
-        """Stops the data logging process and triggers the synchronous save function."""
         self.is_reading = False
         print("[SENSOR] Data logging stopped. Saving data...")
 
-        # Offload the saving work to a thread. Note: pass the function *without* calling it.
         await asyncio.to_thread(
             self._save_data,
-            self.collected_data,
+            self.collected_raw_data,
+            self.collected_force_data,
             self.start_time_host_s,
-            distance_cm,
             speed_mps,
+            distance_cm,
             weight_kg,
-            turf_id
+            turf_id,
         )
-
+        self._clear_buffers()
         return True
-    
-    
-    def _save_data(self, log_data, start_time, speed_mps, distance_cm, weight_kg, turf_id):
-        os.makedirs("readings", exist_ok=True)
 
-        today_str = date.today().isoformat()  # "YYYY-MM-DD"
+    # -------------------- Save --------------------
+    def _save_data(
+        self,
+        log_raw_data,
+        log_force_data,
+        start_time,
+        distance_cm,
+        speed_mps,
+        weight_kg,
+        turf_id,
+    ):
+        os.makedirs("readings", exist_ok=True)
+        print("Speed: " + str(speed_mps))
+        print("distnace: " + str(distance_cm))
+        print("weight: " + str(weight_kg))
+        today_str = date.today().isoformat()
         turf_id = (turf_id or "").strip()
 
-        # Find an existing folder in readings that contains both today and turf_id
         save_dir = None
         for name in os.listdir("readings"):
             path = os.path.join("readings", name)
@@ -173,33 +347,39 @@ class AsyncSensorReader:
                 save_dir = path
                 break
 
-        # If none found, create a new one named "<today>_<turf_id>"
         if save_dir is None:
             folder_name = f"{today_str}_{turf_id}" if turf_id else today_str
             save_dir = os.path.join("readings", folder_name)
             os.makedirs(save_dir, exist_ok=True)
 
         timestamp_s = int(time.time())
-        speed_str = f"{speed_mps:.4f}".replace(".", "p")
+        speed_str = f"{float(speed_mps):.4f}".replace(".", "p")
 
         filename = os.path.join(
             save_dir,
-            f"{timestamp_s}_{int(distance_cm)}cm_{speed_str}mps_{weight_kg}kg_grip_data.csv"
+            f"{timestamp_s}_{int(distance_cm)}cm_{speed_str}mps_{int(weight_kg)}kg_grip_data.csv"
         )
 
-        after_start = [(host_time, line) for host_time, line in log_data if host_time >= start_time]
-        if not after_start:
-            print(f"[SAVE] Data log found ({len(log_data)} entries), but none were recorded after start time ({start_time:.6f} s).")
+        combined = [
+            (t_raw, raw, force)
+            for (t_raw, raw), (t_force, force) in zip(log_raw_data, log_force_data)
+            if t_raw >= start_time
+        ]
+
+        if not combined:
+            print(
+                f"[SAVE] Data log found ({len(log_raw_data)} entries), "
+                f"but none were recorded after start time ({start_time:.6f} s)."
+            )
             return
 
-        raw_values = np.array([line for _, line in after_start], dtype=float)
-        filtered_values = hampel_filter(raw_values, window_size=11, n_sigmas=5.0)
+        raw_values = np.array([raw for _, raw, _ in combined], dtype=float)
+        filtered_raw = hampel_filter(raw_values, window_size=11, n_sigmas=5.0)
 
         with open(filename, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["Host_Time_s", "Raw_Data_Line", "Filtered_Line"])
-            for (host_time, raw_line), filt_line in zip(after_start, filtered_values):
-                writer.writerow([f"{host_time:.6f}", raw_line, int(filt_line)])
+            writer.writerow(["Host_Time_s", "Raw_V3", "Force_N", "Raw_V3_Filtered"])
+            for (host_time, raw, force), raw_filt in zip(combined, filtered_raw):
+                writer.writerow([f"{host_time:.6f}", float(raw), float(force), float(raw_filt)])
 
-        print(f"\n[SAVE] Saved {len(after_start)} data points to {filename}")
-        
+        print(f"\n[SAVE] Saved {len(combined)} data points to {filename}")

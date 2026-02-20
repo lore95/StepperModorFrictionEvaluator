@@ -1,6 +1,10 @@
 import numpy as np
 import pandas as pd
 from typing import Tuple, Dict, Any
+from typing import Optional
+import re
+
+
 
 def _rolling_median(x: np.ndarray, w: int) -> np.ndarray:
     """Centered rolling median using pandas (handles edges)."""
@@ -281,12 +285,8 @@ def load_time_force(filepath: str) -> pd.DataFrame:
         raise ValueError("Missing time column")
 
     # --- force ---
-    if "filtered_line" in df.columns:
-        force = pd.to_numeric(df["filtered_line"], errors="coerce")
-    elif "Filtered_Line" in df.columns:
-        force = pd.to_numeric(df["Filtered_Line"], errors="coerce")
-    elif "Raw_Data_Line" in df.columns:
-        force = pd.to_numeric(df["Raw_Data_Line"], errors="coerce")
+    if "Force_N" in df.columns:
+        force = pd.to_numeric(df["Force_N"], errors="coerce")
     else:
         raise ValueError("Missing force column")
 
@@ -297,3 +297,35 @@ def load_time_force(filepath: str) -> pd.DataFrame:
         raise ValueError("Not enough valid samples")
 
     return out
+    
+def parse_meta(fname: str) -> Optional[tuple[float, float]]:
+    """
+    Parse speed (m/s) and mass (kg) from:
+      1766063168_0cm_0p26mps_85kg_grip_data.csv
+    Returns (v_mps, m_kg) or None.
+    """
+    m_v = re.search(r"_([0-9]+(?:p[0-9]+)?)mps_", fname)
+    m_m = re.search(r"_([0-9]+(?:p[0-9]+)?)kg_", fname)
+    if not m_v or not m_m:
+        return None
+    v_mps = float(m_v.group(1).replace("p", "."))
+    m_kg  = float(m_m.group(1).replace("p", "."))
+    return v_mps, m_kg
+
+
+def dynamic_window_from_result(
+    res: Dict[str, Any],
+    n: int,
+    include_peak_in_dynamic: bool = False
+) -> tuple[int, int]:
+    """
+    Dynamic window = indices from just after peak to trough (inclusive).
+    """
+    peak_idx = int(res["peak_idx"])
+    trough_idx = int(res["trough_idx"])
+    a = peak_idx if include_peak_in_dynamic else min(peak_idx + 1, n - 1)
+    b = trough_idx
+    if b < a:
+        a = b
+    return int(a), int(b)
+

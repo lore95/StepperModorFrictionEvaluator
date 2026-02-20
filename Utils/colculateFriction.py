@@ -40,7 +40,7 @@ def compare_friction(directory='readings'):
     if not files:
         print(f"No grip data files found in {directory}")
         return
-
+    print(files)
     plt.figure(figsize=(12, 6))
     for path in files:
         distance_cm, speed_mps = parse_filename(path)

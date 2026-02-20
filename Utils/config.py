@@ -10,9 +10,9 @@ import serial.tools.list_ports
 # NOTE: You must update this to match the serial port of your Pico W.
 # Example for macOS: '/dev/tty.usbmodem101'
 # Example for Windows: 'COM3'
-SERIAL_PORT = '/dev/tty.usbmodem1101' 
+SERIAL_PORT = '/dev/tty.usbmodem101' 
 BAUD_RATE = 115200
-
+BLE_ID = "09916A0D-1C88-FFB7-9BCC-005191B357F9"
 # ====================================================================
 # FORCE SENSOR (BLE) CONFIGURATION
 # ====================================================================
@@ -20,19 +20,14 @@ BAUD_RATE = 115200
 # NOTE: You must update these UUIDs and address for your device.
 
 # Data FROM device TO PC (Notify)
-UART_TX_CHAR_UUID = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E" 
+UART_TX_CHAR_UUID = "6e400003-b5a3-f393-e0a9-e50e24dcca9e"
 # Data FROM PC TO device (Write)
-UART_RX_CHAR_UUID = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
+UART_RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
 
 # Device address configuration
 # NOTE: Update the address that matches your OS and device.
-BLE_ADDRESS = (
-    # Example for Windows/Linux
-    "F5:8B:A2:4C:AD:9C"  
-    if platform.system() != "Darwin"
-    # Example for macOS
-    else "6375EA4B-23F2-5C9E-249F-5EC7660C1DA1" 
-)
+SERVICE_ADDRESS = "6e400001-b5a3-f393-e0a9-e50e24dcca9e" 
+
 
 # ====================================================================
 # GUI CONFIGURATION
